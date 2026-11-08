@@ -1,0 +1,99 @@
+name: Android Lint and Format
+
+on:
+  push:
+    paths:
+      - 'app/**'
+      - '*.gradle*'
+    branches:
+      - main
+  pull_request:
+    paths:
+      - 'app/**'
+      - '*.gradle*'
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Android Lint
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          sdk-version: 35
+          build-tools-version: 35.0.0
+          accept-licenses: yes
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-lint-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-lint-
+
+      - name: Run lint
+        run: ./gradlew lintDebug
+
+      - name: Upload lint report
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-report
+          path: app/build/reports/lint-results-*.html
+          retention-days: 7
+
+  format:
+    name: Code Format Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Check Kotlin formatting
+        run: ./gradlew spotlessCheck
+
+  ktlint:
+    name: KTLint
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Run ktlint
+        uses: ScaCap/action-ktlint@v1.3.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          repo_root: app
+          android: true
+          fail_on_error: true

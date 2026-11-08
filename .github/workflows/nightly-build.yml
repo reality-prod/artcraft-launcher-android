@@ -1,0 +1,122 @@
+name: Nightly Build
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # Run at 2 AM UTC every day
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reason for manual nightly build'
+        required: false
+        default: 'Manual nightly build'
+
+env:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.workers.max=4"
+
+jobs:
+  nightly-build:
+    name: Nightly Build
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          sdk-version: 35
+          build-tools-version: 35.0.0
+          accept-licenses: yes
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android,armv7-linux-androideabi
+          profile: minimal
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Setup Android NDK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y android-sdk-ndk
+          echo "ANDROID_NDK_HOME=$(dirname $(dirname $(which ndk-build)))" >> $GITHUB_ENV
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-nightly-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-nightly-
+
+      - name: Cache Rust
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-nightly-${{ hashFiles('rust/**/Cargo.*') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nightly-
+
+      - name: Build with Rust
+        run: cd rust && cargo ndk -t arm64-v8a -t armeabi-v7a -o ../app/src/main/jniLibs build --release
+
+      - name: Build APK with Rust
+        run: ./gradlew assembleRelease -PbuildRust
+
+      - name: Generate nightly version name
+        id: version
+        run: |
+          DATE=$(date +%Y%m%d)
+          echo "version=nightly-${DATE}" >> $GITHUB_OUTPUT
+          echo "NIGHTLY_VERSION=nightly-${DATE}" >> $GITHUB_ENV
+
+      - name: Rename APK with nightly version
+        run: |
+          mkdir -p nightly
+          cp app/build/outputs/apk/release/*.apk nightly/artcraft-launcher-${{ steps.version.outputs.version }}.apk
+
+      - name: Upload nightly APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: artcraft-launcher-nightly
+          path: nightly/*.apk
+          retention-days: 30
+
+      - name: Create nightly release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly-${{ steps.version.outputs.version }}
+          name: ArtCraft Launcher Nightly (${{ steps.version.outputs.version }})
+          body: |
+            **Nightly build** - Automated daily build with latest changes
+            
+            ⚠️ **Use at your own risk** - This is an automated build that may contain bugs
+            
+            ### What's new
+            - Built from latest main branch (${{ github.sha }})
+            - Includes latest Rust bridge enhancements
+            
+            ### Download
+            - [Download APK](https://github.com/${{ github.repository }}/suites/${{ github.run_id }}/artifacts/${{ github.run_attempt }})
+          prerelease: true
+          draft: false
+          files: nightly/*.apk
+          make_latest: false

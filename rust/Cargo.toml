@@ -1,0 +1,11 @@
+[workspace]
+members = ["bridge"]
+resolver = "2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1
+# Keep unwinding: every JNI entry point wraps its work in catch_unwind so a bug returns an
+# error string to Kotlin instead of aborting the app.

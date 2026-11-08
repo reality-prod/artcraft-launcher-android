@@ -1,0 +1,148 @@
+name: Manual Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., v2.1.0)'
+        required: true
+        type: string
+      message:
+        description: 'Release message / changelog'
+        required: false
+        type: string
+        default: ''
+      publish-to-reality-prod:
+        description: 'Publish to reality-prod/artcraft-launcher-android'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.workers.max=4"
+
+jobs:
+  build:
+    name: Build Release
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          sdk-version: 35
+          build-tools-version: 35.0.0
+          accept-licenses: yes
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android,armv7-linux-androideabi
+          profile: minimal
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Setup Android NDK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y android-sdk-ndk
+          echo "ANDROID_NDK_HOME=$(dirname $(dirname $(which ndk-build)))" >> $GITHUB_ENV
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-manual-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Cache Rust
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-manual-${{ hashFiles('rust/**/Cargo.*') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build with Rust
+        run: cd rust && cargo ndk -t arm64-v8a -t armeabi-v7a -o ../app/src/main/jniLibs build --release
+
+      - name: Build APK with Rust
+        run: ./gradlew assembleRelease -PbuildRust
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: artcraft-launcher-release
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 7
+
+  release:
+    name: Create Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Download APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: artcraft-launcher-release
+          path: apks
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: ArtCraft Launcher ${{ inputs.version }}
+          body: ${{ inputs.message }}
+          files: apks/*.apk
+          generate_release_notes: false
+          prerelease: false
+
+  publish:
+    name: Publish to reality-prod
+    needs: [release]
+    runs-on: ubuntu-latest
+    if: inputs.publish-to-reality-prod == true
+    
+    steps:
+      - name: Download APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: artcraft-launcher-release
+          path: apks
+
+      - name: Create PR to reality-prod/artcraft-launcher-android
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.REALITY_PROD_PAT }}
+          commit-message: "chore: Update ArtCraft Launcher to ${{ inputs.version }}"
+          title: "chore: Update ArtCraft Launcher to ${{ inputs.version }}"
+          body: |
+            Manual update from ${{ github.repository }}@${{ inputs.version }}
+            
+            - Updated APK files
+            - Built with Rust bridge support
+          branch: "manual-update-launcher-${{ inputs.version }}"
+          base: main
+          delete-branch: true
+          author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
