@@ -6,6 +6,6 @@ build/
 captures/
 *.jks
 *.keystore
-
+*.apk
 app/src/main/jniLibs/
 rust/target/
