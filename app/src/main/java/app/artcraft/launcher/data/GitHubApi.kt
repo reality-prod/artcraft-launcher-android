@@ -18,6 +18,12 @@ object GitHubApi {
     /** Set once at startup. Holds ETag + body per request so unchanged answers cost no rate limit. */
     @Volatile var cacheDir: File? = null
 
+    /** Optional personal access token: lifts the limit from 60 to 5,000 requests per hour. */
+    @Volatile var token: String? = null
+
+    /** Most ArtCraft Android apps are betas, so pre-releases count unless the user opts out. */
+    @Volatile var includePrereleases: Boolean = true
+
     private fun key(path: String) = path.hashCode().toUInt().toString(16)
     private fun readCache(path: String): Pair<String, String>? = try {
         val d = cacheDir
@@ -42,6 +48,7 @@ object GitHubApi {
         c.setRequestProperty("Accept", "application/vnd.github+json")
         c.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
         c.setRequestProperty("User-Agent", "ArtCraft-Launcher-Android")
+        token?.let { c.setRequestProperty("Authorization", "Bearer $it") }
         val cached = readCache(path)
         if (cached != null) c.setRequestProperty("If-None-Match", cached.first)
         try {
@@ -90,6 +97,7 @@ object GitHubApi {
         for (i in 0 until arr.length()) {
             val o = arr.getJSONObject(i)
             if (o.optBoolean("draft")) continue
+            if (o.optBoolean("prerelease") && !includePrereleases) continue
             val r = parseRelease(o)
             if (r.apks.isNotEmpty()) return r
             if (fallback == null) fallback = r
@@ -117,6 +125,7 @@ object GitHubApi {
             prerelease = o.optBoolean("prerelease"),
             pageUrl = o.optString("html_url"),
             apks = apks,
+            notes = if (o.isNull("body")) "" else o.optString("body"),
         )
     }
 }

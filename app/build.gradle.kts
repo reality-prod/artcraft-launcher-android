@@ -9,11 +9,23 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "app.artcraft.launcher"
+        // Own id (not under artcraft.app, a domain nobody here owns). Namespace stays app.artcraft.launcher.
+        applicationId = "io.github.realityprod.artcraftlauncher"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        // CI passes the tag: -PappVersion=0.2.0 -PappVersionCode=20099
+        versionCode = providers.gradleProperty("appVersionCode").map(String::toInt).getOrElse(1)
+        versionName = providers.gradleProperty("appVersion").getOrElse("0.1.0-dev")
+    }
+
+    // One APK per CPU type: the launcher's own release picks the right one by name.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a")
+            isUniversalApk = false
+        }
     }
 
     // Release signing comes from env vars so no secrets live in the repo.
@@ -56,22 +68,11 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-core")
-    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-    
-    // Lottie animation support
-    implementation("com.airbnb.android:lottie-compose:6.4.0")
-    
-    // Coil for image loading
-    implementation("io.coil-kt:coil-compose:2.6.0")
-    
-    // Accompanist for additional Compose utilities
-    implementation("com.google.accompanist:accompanist-navigation-animation:0.34.0")
-    
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
 

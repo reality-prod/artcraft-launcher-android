@@ -95,7 +95,10 @@ mod tests {
 
     #[test]
     fn strips_names_and_android_suffixes() {
-        assert_eq!(compare("pdfcraft-v0.12.1-android.2", "pdfcraft-v0.12.1-android.3"), -1);
+        assert_eq!(
+            compare("pdfcraft-v0.12.1-android.2", "pdfcraft-v0.12.1-android.3"),
+            -1
+        );
         assert_eq!(compare("pdfcraft-v0.12.1-android.3", "0.12.0"), 1);
     }
 

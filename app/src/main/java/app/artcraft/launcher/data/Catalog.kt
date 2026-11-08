@@ -13,6 +13,7 @@ data class ReleaseInfo(
     val prerelease: Boolean,
     val pageUrl: String,
     val apks: List<ApkAsset>,
+    val notes: String = "",
 )
 
 data class Repo(val owner: String, val repo: String) {
@@ -52,6 +53,9 @@ object Sources {
 
     /** GitHub orgs scanned for "*-android" repos. */
     val ORGS = listOf(ANDROID_ORG)
+
+    /** Where this launcher itself is published; used for the self-update check. */
+    val SELF = Repo("reality-prod", "artcraft-launcher-android")
 
     val KNOWN = listOf(
         KnownApp("PdfCraft", "PDF reader and editor: comments, forms, sign, read aloud",
@@ -126,7 +130,7 @@ fun CatalogApp.toJson(): JSONObject = JSONObject().apply {
     release?.let { r ->
         put("release", JSONObject().apply {
             put("tag", r.tag); put("title", r.title); put("at", r.publishedAt)
-            put("pre", r.prerelease); put("page", r.pageUrl)
+            put("pre", r.prerelease); put("page", r.pageUrl); put("notes", r.notes)
             put("apks", JSONArray().also { arr ->
                 r.apks.forEach { a ->
                     arr.put(JSONObject().apply {
@@ -145,7 +149,7 @@ fun catalogAppFromJson(o: JSONObject): CatalogApp {
         val a = r.getJSONArray("apks")
         ReleaseInfo(
             tag = r.getString("tag"), title = r.optString("title"), publishedAt = r.optString("at"),
-            prerelease = r.optBoolean("pre"), pageUrl = r.optString("page"),
+            prerelease = r.optBoolean("pre"), pageUrl = r.optString("page"), notes = r.optString("notes"),
             apks = List(a.length()) {
                 val x = a.getJSONObject(it)
                 ApkAsset(x.getString("n"), x.getString("u"), x.optLong("s"),

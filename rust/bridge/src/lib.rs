@@ -4,7 +4,7 @@
 //! entry point catches panics and answers with an error value, and all input is treated as
 //! hostile (it comes from the network).
 //!
-//! The pure logic lives in `assets`, `version`, `checksum`, and `apk_metadata` and is unit-tested without a JVM.
+//! The pure logic lives in `assets`, `version` and `checksum` and is unit-tested without a JVM.
 //! `jni_glue` is the only module that touches JNI.
 #![deny(
     clippy::unwrap_used,
@@ -17,17 +17,16 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 #![deny(unsafe_code)]
 
-pub mod apk_metadata;
-pub mod apk_utils;
 pub mod assets;
 pub mod checksum;
+pub mod text;
 pub mod version;
 
 #[allow(unsafe_code)] // `#[no_mangle]` JNI exports are the only unsafe-flagged items.
 mod jni_glue {
-    use crate::{apk_metadata, apk_utils, assets, checksum, version};
+    use crate::{assets, checksum, text, version};
     use jni::objects::{JClass, JString};
-    use jni::sys::{jint, jstring};
+    use jni::sys::{jint, jlong, jstring};
     use jni::JNIEnv;
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -92,12 +91,13 @@ mod jni_glue {
         else {
             return reply(&mut env, "bad arguments");
         };
-        let out = guarded("internal error".to_string(), move || {
-            match checksum::verify_file(&path, &expected) {
+        let out = guarded(
+            "internal error".to_string(),
+            move || match checksum::verify_file(&path, &expected) {
                 Ok(()) => String::new(),
                 Err(e) => e,
-            }
-        });
+            },
+        );
         reply(&mut env, &out)
     }
 
@@ -119,6 +119,50 @@ mod jni_glue {
         reply(&mut env, &out)
     }
 
+    /// `String humanSize(long bytes)` -> "78.4 MB".
+    #[no_mangle]
+    pub extern "system" fn Java_app_artcraft_launcher_bridge_NativeCore_humanSize<'l>(
+        mut env: JNIEnv<'l>,
+        _class: JClass<'l>,
+        bytes: jlong,
+    ) -> jstring {
+        let out = guarded(String::new(), move || {
+            text::human_size(u64::try_from(bytes).unwrap_or(0))
+        });
+        reply(&mut env, &out)
+    }
+
+    /// `String plainNotes(String markdown, int maxChars)` -> readable text, 0 = no limit.
+    #[no_mangle]
+    pub extern "system" fn Java_app_artcraft_launcher_bridge_NativeCore_plainNotes<'l>(
+        mut env: JNIEnv<'l>,
+        _class: JClass<'l>,
+        markdown: JString<'l>,
+        max_chars: jint,
+    ) -> jstring {
+        let Some(md) = read(&mut env, &markdown) else {
+            return reply(&mut env, "");
+        };
+        let max = usize::try_from(max_chars).unwrap_or(0);
+        let out = guarded(String::new(), move || text::plain_notes(&md, max));
+        reply(&mut env, &out)
+    }
+
+    /// `String relativeTime(String iso8601, long nowEpochSeconds)` -> "3 days ago", or "".
+    #[no_mangle]
+    pub extern "system" fn Java_app_artcraft_launcher_bridge_NativeCore_relativeTime<'l>(
+        mut env: JNIEnv<'l>,
+        _class: JClass<'l>,
+        iso: JString<'l>,
+        now_epoch: jlong,
+    ) -> jstring {
+        let Some(iso) = read(&mut env, &iso) else {
+            return reply(&mut env, "");
+        };
+        let out = guarded(String::new(), move || text::relative_time(&iso, now_epoch));
+        reply(&mut env, &out)
+    }
+
     /// `String bridgeVersion()`
     #[no_mangle]
     pub extern "system" fn Java_app_artcraft_launcher_bridge_NativeCore_bridgeVersion<'l>(
@@ -126,179 +170,5 @@ mod jni_glue {
         _class: JClass<'l>,
     ) -> jstring {
         reply(&mut env, env!("CARGO_PKG_VERSION"))
-    }
-
-    /// `String nativeValidateApk(String path)`
-    /// Returns empty string on success, or error message.
-    #[no_mangle]
-    pub extern "system" fn Java_app_artcraft_launcher_bridge_NativeCore_nativeValidateApk<'l>(
-        mut env: JNIEnv<'l>,
-        _class: JClass<'l>,
-        path: JString<'l>,
-    ) -> jstring {
-        let Some(path) = read(&mut env, &path) else {
-            return reply(&mut env, "bad path");
-        };
-        let out = guarded(
-            "internal error".to_string(),
-            move || match apk_metadata::validate_apk(&path) {
-                Ok(()) => String::new(),
-                Err(e) => e,
-            },
-        );
-        reply(&mut env, &out)
-    }
-
-    /// `boolean nativeIsApkCompatible(String apkName, String abisCsv)`
-    /// Returns true if APK is compatible with any of the given ABIs.
-    #[no_mangle]
-    pub extern "system" fn Java_app_artcraft_launcher_bridge_NativeCore_nativeIsApkCompatible<'l>(
-        mut env: JNIEnv<'l>,
-        _class: JClass<'l>,
-        apk_name: JString<'l>,
-        abis_csv: JString<'l>,
-    ) -> jni::sys::jboolean {
-        let (Some(name), Some(abis_csv)) = (read(&mut env, &apk_name), read(&mut env, &abis_csv))
-        else {
-            return jni::sys::JNI_FALSE;
-        };
-        let abis: Vec<&str> = abis_csv.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
-        guarded(
-            jni::sys::JNI_FALSE,
-            move || {
-                if apk_metadata::is_apk_compatible_with_abi(&name, &abis) {
-                    jni::sys::JNI_TRUE
-                } else {
-                    jni::sys::JNI_FALSE
-                }
-            },
-        )
-    }
-
-    /// `String nativeGetAbiFromApkName(String apkName)`
-    /// Returns ABI string or empty string if universal.
-    #[no_mangle]
-    pub extern "system" fn Java_app_artcraft_launcher_bridge_NativeCore_nativeGetAbiFromApkName<'l>(
-        mut env: JNIEnv<'l>,
-        _class: JClass<'l>,
-        apk_name: JString<'l>,
-    ) -> jstring {
-        let Some(name) = read(&mut env, &apk_name) else {
-            return reply(&mut env, "");
-        };
-        let out = guarded(
-            String::new(),
-            move || apk_metadata::get_abi_from_apk_name(&name).unwrap_or_default(),
-        );
-        reply(&mut env, &out)
-    }
-
-    /// `String nativeExtractPackageName(String path)`
-    /// Extracts package name from APK file.
-    #[no_mangle]
-    pub extern "system" fn Java_app_artcraft_launcher_bridge_NativeCore_nativeExtractPackageName<'l>(
-        mut env: JNIEnv<'l>,
-        _class: JClass<'l>,
-        path: JString<'l>,
-    ) -> jstring {
-        let Some(path) = read(&mut env, &path) else {
-            return reply(&mut env, "");
-        };
-        let out = guarded(
-            String::new(),
-            move || apk_utils::extract_package_name_from_apk(&path).unwrap_or_default(),
-        );
-        reply(&mut env, &out)
-    }
-
-    /// `int nativeExtractVersionCode(String apkName)`
-    /// Extracts version code from APK filename.
-    #[no_mangle]
-    pub extern "system" fn Java_app_artcraft_launcher_bridge_NativeCore_nativeExtractVersionCode<'l>(
-        mut env: JNIEnv<'l>,
-        _class: JClass<'l>,
-        apk_name: JString<'l>,
-    ) -> jint {
-        let Some(name) = read(&mut env, &apk_name) else {
-            return 0;
-        };
-        guarded(0, move || apk_utils::extract_version_code_from_apk_name(&name).unwrap_or(0) as jint)
-    }
-
-    /// `String nativeExtractVersionName(String apkName)`
-    /// Extracts version name from APK filename.
-    #[no_mangle]
-    pub extern "system" fn Java_app_artcraft_launcher_bridge_NativeCore_nativeExtractVersionName<'l>(
-        mut env: JNIEnv<'l>,
-        _class: JClass<'l>,
-        apk_name: JString<'l>,
-    ) -> jstring {
-        let Some(name) = read(&mut env, &apk_name) else {
-            return reply(&mut env, "");
-        };
-        let out = guarded(
-            String::new(),
-            move || apk_utils::extract_version_name_from_apk_name(&name).unwrap_or_default(),
-        );
-        reply(&mut env, &out)
-    }
-
-    /// `String nativeGetApkHash(String path)`
-    /// Gets SHA-256 hash of APK file.
-    #[no_mangle]
-    pub extern "system" fn Java_app_artcraft_launcher_bridge_NativeCore_nativeGetApkHash<'l>(
-        mut env: JNIEnv<'l>,
-        _class: JClass<'l>,
-        path: JString<'l>,
-    ) -> jstring {
-        let Some(path) = read(&mut env, &path) else {
-            return reply(&mut env, "");
-        };
-        let out = guarded(
-            String::new(),
-            move || apk_utils::get_apk_hash(&path).unwrap_or_default(),
-        );
-        reply(&mut env, &out)
-    }
-
-    /// `boolean nativeIsSplitApk(String apkName)`
-    /// Checks if APK is a split APK.
-    #[no_mangle]
-    pub extern "system" fn Java_app_artcraft_launcher_bridge_NativeCore_nativeIsSplitApk<'l>(
-        mut env: JNIEnv<'l>,
-        _class: JClass<'l>,
-        apk_name: JString<'l>,
-    ) -> jni::sys::jboolean {
-        let Some(name) = read(&mut env, &apk_name) else {
-            return jni::sys::JNI_FALSE;
-        };
-        guarded(
-            jni::sys::JNI_FALSE,
-            move || {
-                if apk_utils::is_split_apk(&name) {
-                    jni::sys::JNI_TRUE
-                } else {
-                    jni::sys::JNI_FALSE
-                }
-            },
-        )
-    }
-
-    /// `String nativeGetSupportedAbis(String apkName)`
-    /// Gets comma-separated list of supported ABIs from APK name.
-    #[no_mangle]
-    pub extern "system" fn Java_app_artcraft_launcher_bridge_NativeCore_nativeGetSupportedAbis<'l>(
-        mut env: JNIEnv<'l>,
-        _class: JClass<'l>,
-        apk_name: JString<'l>,
-    ) -> jstring {
-        let Some(name) = read(&mut env, &apk_name) else {
-            return reply(&mut env, "");
-        };
-        let out = guarded(
-            String::new(),
-            move || apk_utils::get_supported_abis_from_apk_name(&name).join(","),
-        );
-        reply(&mut env, &out)
     }
 }

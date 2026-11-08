@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -31,9 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -43,6 +40,8 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -72,6 +71,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -80,13 +80,14 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.artcraft.launcher.bridge.ApkInstaller
+import app.artcraft.launcher.bridge.NativeCore
 import app.artcraft.launcher.data.CatalogApp
+import app.artcraft.launcher.data.SettingsState
 import app.artcraft.launcher.data.IconLoader
 
 private const val TAB_APPS = 0
 private const val TAB_INSTALLED = 1
-private const val TAB_SETTINGS = 2
-private const val TAB_ABOUT = 3
+private const val TAB_ABOUT = 2
 
 /**
  * Mobile-first: one column, bottom navigation, store-style rows with a single thumb-reachable
@@ -97,12 +98,12 @@ private const val TAB_ABOUT = 3
 @Composable
 fun LauncherScreen(vm: LauncherViewModel = viewModel()) {
     val state by vm.state.collectAsStateWithLifecycle()
+    val session by vm.session.collectAsStateWithLifecycle()
+    val settings by vm.settings.collectAsStateWithLifecycle()
     val ctx = LocalContext.current
     val snack = remember { SnackbarHostState() }
     var tab by rememberSaveable { mutableIntStateOf(TAB_APPS) }
     var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
-    var showInstallScreen by rememberSaveable { mutableStateOf<CardState?>(null) }
-    var showSettings by rememberSaveable { mutableStateOf(false) }
 
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { vm.onResume() }
 
@@ -144,10 +145,8 @@ fun LauncherScreen(vm: LauncherViewModel = viewModel()) {
                     { Icon(Icons.Default.Home, null) }, label = { Text("Apps") })
                 NavigationBarItem(tab == TAB_INSTALLED, { tab = TAB_INSTALLED },
                     { Icon(Icons.Default.Check, null) }, label = { Text("Installed") })
-                NavigationBarItem(tab == TAB_SETTINGS, { tab = TAB_SETTINGS },
-                    { Icon(Icons.Default.Settings, null) }, label = { Text("Settings") })
                 NavigationBarItem(tab == TAB_ABOUT, { tab = TAB_ABOUT },
-                    { Icon(Icons.Default.Info, null) }, label = { Text("About") })
+                    { Icon(Icons.Default.Info, null) }, label = { Text("Settings") })
             }
         },
         snackbarHost = { SnackbarHost(snack) },
@@ -157,25 +156,20 @@ fun LauncherScreen(vm: LauncherViewModel = viewModel()) {
             onRefresh = vm::refresh,
             modifier = Modifier.padding(pad).fillMaxSize(),
         ) {
-            when (tab) {
-                TAB_SETTINGS -> SettingsScreen(onBack = { tab = TAB_APPS })
-                TAB_ABOUT -> AboutTab()
-                else -> AppList(
-                    cards = if (tab == TAB_INSTALLED) state.cards.filter { it.local != null } else state.cards,
-                    installedTab = tab == TAB_INSTALLED,
-                    warning = state.warning,
-                    summary = state.summary,
-                    onOpenDetails = { selectedId = it.app.id },
-                    onPrimary = { card ->
-                        if (card.action == CardAction.INSTALL || card.action == CardAction.UPDATE) {
-                            showInstallScreen = card
-                        } else {
-                            vm.onPrimary(card)
-                        }
-                    },
-                    onCancel = vm::cancel,
-                )
-            }
+            if (tab == TAB_ABOUT) SettingsTab(settings, { f -> vm.updateSettings(f) }, vm::clearCache)
+            else AppList(
+                cards = if (tab == TAB_INSTALLED) state.cards.filter { it.local != null } else state.cards,
+                installedTab = tab == TAB_INSTALLED,
+                warning = state.warning,
+                summary = state.summary,
+                selfUpdate = state.selfUpdate,
+                updates = state.updatesAvailable,
+                onUpdateSelf = vm::updateSelf,
+                onUpdateAll = vm::updateAll,
+                onOpenDetails = { selectedId = it.app.id },
+                onPrimary = vm::onPrimary,
+                onCancel = vm::cancel,
+            )
         }
     }
 
@@ -185,106 +179,18 @@ fun LauncherScreen(vm: LauncherViewModel = viewModel()) {
             onDismissRequest = { selectedId = null },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         ) {
-            Details(card, { 
-                if (card.action == CardAction.INSTALL || card.action == CardAction.UPDATE) {
-                    showInstallScreen = card
-                    selectedId = null
-                } else {
-                    vm.onPrimary(card)
-                }
-            }, { vm.cancel(card) }, { uninstall(card) })
+            Details(card, { vm.onPrimary(card) }, { vm.cancel(card) }, { uninstall(card) })
         }
     }
-    
-    // Install screen with custom animations
-    showInstallScreen?.let { installCard ->
-        val progressCard = state.cards.firstOrNull { it.app.id == installCard.app.id }
-        val busy = progressCard?.busy
-        
-        if (busy != null && busy is Busy.Downloading) {
-            ModalBottomSheet(
-                onDismissRequest = {
-                    if (busy is Busy.Downloading || busy is Busy.Installing) {
-                        vm.cancel(installCard)
-                    }
-                    showInstallScreen = null
-                },
-                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            ) {
-                InstallContent(
-                    card = progressCard!!,
-                    onCancel = {
-                        vm.cancel(installCard)
-                        showInstallScreen = null
-                    }
-                )
-            }
-        } else {
-            showInstallScreen = null
-        }
-    }
-}
 
-@Composable
-private fun InstallContent(card: CardState, onCancel: () -> Unit) {
-    val busy = card.busy
-    val apk = card.apk
-    
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(24.dp)
-            .navigationBarsPadding(),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        Text(
-            text = card.app.name,
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold
+    session?.let { sess ->
+        InstallScreen(
+            s = sess,
+            onBackground = vm::dismissSession,
+            onCancel = vm::cancelSession,
+            onRetry = vm::retrySession,
+            onOpen = { vm.openFromSession(); vm.dismissSession() },
         )
-        
-        when (busy) {
-            is Busy.Downloading -> {
-                Text("Downloading APK", style = MaterialTheme.typography.bodyMedium)
-                
-                LinearProgressIndicator(
-                    progress = { busy.fraction },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                
-                apk?.let {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("${(busy.fraction * 100).toInt()}%")
-                        Text("${it.size / 1_048_576} MB")
-                    }
-                }
-                
-                Spacer(modifier = Modifier.height(16.dp))
-                
-                OutlinedButton(onClick = onCancel) {
-                    Text("Cancel")
-                }
-            }
-            Busy.Installing -> {
-                Text("Waiting for installer", style = MaterialTheme.typography.bodyMedium)
-                CircularProgressIndicator()
-                Spacer(modifier = Modifier.height(16.dp))
-                Text("Please confirm the installation in the Android installer dialog")
-                Spacer(modifier = Modifier.height(16.dp))
-                OutlinedButton(onClick = onCancel) {
-                    Text("Cancel")
-                }
-            }
-            null -> {
-                // Should not happen, but just in case
-                Text("Preparing installation", style = MaterialTheme.typography.bodyMedium)
-                CircularProgressIndicator()
-            }
-        }
     }
 }
 
@@ -295,6 +201,10 @@ private fun AppList(
     installedTab: Boolean,
     warning: String?,
     summary: String?,
+    selfUpdate: SelfUpdate?,
+    updates: Int,
+    onUpdateSelf: () -> Unit,
+    onUpdateAll: () -> Unit,
     onOpenDetails: (CardState) -> Unit,
     onPrimary: (CardState) -> Unit,
     onCancel: (CardState) -> Unit,
@@ -310,22 +220,31 @@ private fun AppList(
                     color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
             warning?.let { w -> item { Banner(w) } }
+            selfUpdate?.let { u ->
+                item(key = "self-update") {
+                    UpdateBanner("ArtCraft Launcher ${u.tag} is available", "Update", onUpdateSelf)
+                }
+            }
+            if (updates > 1) {
+                item(key = "update-all") { UpdateBanner("$updates app updates available", "Update all", onUpdateAll) }
+            }
             if (installedTab && cards.isEmpty()) {
                 item { Banner("Nothing installed yet. Get an app from the Apps tab.") }
             }
             items(cards, key = { it.app.id }) { card ->
-                AppRow(card, { onOpenDetails(card) }, { onPrimary(card) }, { onCancel(card) })
+                AppRow(card, { onOpenDetails(card) }, { onPrimary(card) }, { onCancel(card) }, Modifier.animateItem())
             }
         }
     }
 }
 
 @Composable
-private fun AppRow(card: CardState, onDetails: () -> Unit, onPrimary: () -> Unit, onCancel: () -> Unit) {
+private fun AppRow(card: CardState, onDetails: () -> Unit, onPrimary: () -> Unit, onCancel: () -> Unit,
+                   modifier: Modifier = Modifier) {
     val cs = MaterialTheme.colorScheme
     val soon = card.action == CardAction.COMING_SOON
     Surface(shape = RoundedCornerShape(20.dp), color = cs.surfaceContainerLow,
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onDetails)) {
+        modifier = modifier.fillMaxWidth().clickable(onClick = onDetails)) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 Box(Modifier.alpha(if (soon) 0.55f else 1f)) { AppIcon(card.app, 60.dp) }
@@ -415,6 +334,16 @@ private fun Details(card: CardState, onPrimary: () -> Unit, onCancel: () -> Unit
 
         card.note?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = cs.primary) }
 
+        card.app.release?.let { r ->
+            val ago = NativeCore.ago(r.publishedAt)
+            if (ago.isNotEmpty()) Text("Released $ago", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+            val notes = NativeCore.notes(r.notes, 700)
+            if (notes.isNotBlank()) {
+                Text("What's new", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Text(notes, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+            }
+        }
+
         card.apk?.let { apk ->
             Text("File for your phone: ${apk.name}" +
                 (apk.size.takeIf { it > 0 }?.let { " (%.1f MB)".format(it / 1_048_576.0) } ?: "") +
@@ -453,27 +382,83 @@ private fun Details(card: CardState, onPrimary: () -> Unit, onCancel: () -> Unit
     }
 }
 
-// ------------------------------------------------------------------ about
+// ------------------------------------------------------------------ settings
 @Composable
-private fun AboutTab() {
+private fun SettingsTab(
+    s: SettingsState,
+    onChange: ((SettingsState) -> SettingsState) -> Unit,
+    onClearCache: () -> Unit,
+) {
     val uri = LocalUriHandler.current
+    val ctx = LocalContext.current
+    var token by rememberSaveable(s.token) { mutableStateOf(s.token) }
+    val version = remember {
+        @Suppress("DEPRECATION")
+        runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() ?: "?"
+    }
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         Column(
             Modifier.widthIn(max = 640.dp).verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Text("What is this?", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Text("A launcher for the open-source ArtCraft family on Android. It scans the " +
-                "artcraft-android GitHub org and storytold/artcraft, shows what has an Android build, " +
-                "and installs the latest release for your phone. Anything without an APK yet is marked " +
-                "Coming soon. Desktop-only tools are rebuilt as native Kotlin apps for mobile, and appear " +
-                "here once those builds ship.")
-            Text("Pull down on the Apps tab to rescan.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Settings", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            SettingRow("Download on Wi-Fi only", "Skips downloads while you're on mobile data.", s.wifiOnly) { v ->
+                onChange { it.copy(wifiOnly = v) }
+            }
+            SettingRow("Include pre-releases", "Most ArtCraft Android apps are still in beta.", s.includePre) { v ->
+                onChange { it.copy(includePre = v) }
+            }
+            OutlinedTextField(
+                value = token, onValueChange = { token = it }, singleLine = true,
+                label = { Text("GitHub token (optional)") },
+                supportingText = { Text("Raises the scan limit from 60 to 5,000 requests an hour. Kept on this device only.") },
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            if (token != s.token) {
+                Button(onClick = { onChange { it.copy(token = token.trim()) } }) { Text("Save token") }
+            }
+            OutlinedButton(onClick = onClearCache) { Text("Clear download cache") }
+            Text("Launcher $version · native core: ${NativeCore.describe()}",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+            Text("What is this?", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("A launcher for the open-source ArtCraft family on Android. It reads a saved list of direct " +
+                "download links (falling back to GitHub's API and release pages), shows what has an Android build, " +
+                "and installs the latest release for your phone, checking the SHA-256 when one is published. " +
+                "Anything without an APK yet is marked Coming soon.")
             TextButton(onClick = { uri.openUri("https://github.com/artcraft-android") }) { Text("github.com/artcraft-android") }
             TextButton(onClick = { uri.openUri("https://github.com/storytold/artcraft") }) { Text("github.com/storytold/artcraft") }
+            TextButton(onClick = { uri.openUri("https://github.com/reality-prod/artcraft-launcher-android") }) {
+                Text("github.com/reality-prod/artcraft-launcher-android")
+            }
             Text("Unofficial community launcher. Not affiliated with Adobe; Acrobat, Lightroom and " +
                 "Premiere are trademarks of Adobe Inc.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun SettingRow(title: String, subtitle: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Switch(checked = checked, onCheckedChange = onChecked)
+    }
+}
+
+@Composable
+private fun UpdateBanner(text: String, action: String, onClick: () -> Unit) {
+    Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.primaryContainer,
+        modifier = Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Text(text, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer)
+            Button(onClick = onClick) { Text(action) }
         }
     }
 }
@@ -495,15 +480,18 @@ private fun Pill(text: String, bg: Color = MaterialTheme.colorScheme.surfaceVari
 }
 
 @Composable
-private fun AppIcon(app: CatalogApp, size: Dp) {
+private fun AppIcon(app: CatalogApp, size: Dp) = IconTile(app.name, app.iconUrls, size)
+
+@Composable
+internal fun IconTile(name: String, iconUrls: List<String>, size: Dp) {
     val ctx = LocalContext.current
-    val bmp by produceState<ImageBitmap?>(null, app.iconUrls) { value = IconLoader.load(ctx, app.iconUrls) }
+    val bmp by produceState<ImageBitmap?>(null, iconUrls) { value = IconLoader.load(ctx, iconUrls) }
     Box(
         Modifier.size(size).clip(RoundedCornerShape(size * 0.22f)).background(MaterialTheme.colorScheme.surfaceVariant),
         contentAlignment = Alignment.Center,
     ) {
         val b = bmp
-        if (b != null) Image(b, app.name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-        else Text(app.name.take(1), style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary)
+        if (b != null) Image(b, name, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        else Text(name.take(1), style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary)
     }
 }

@@ -1,0 +1,316 @@
+#!/usr/bin/env bash
+
+# SPDX-License-Identifier: Apache-2.0
+#
+# Copyright 2026 The APK Signer Contributors
+#
+# APK Signer - Cross-platform APK signing utility.
+# Licensed under Apache License 2.0.
+
+set -Eeuo pipefail
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+VERSION="2.1.0"
+
+SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Android/sdk}}"
+
+KEYSTORE="${KEYSTORE:-my-release-key.jks}"
+ALIAS="${KEY_ALIAS:-my-key-alias}"
+
+INPUT="${INPUT_APK:-app/build/outputs/apk/release/*.apk}"
+ALIGNED="${ALIGNED_APK:-app-aligned.apk}"
+OUTPUT="${SIGNED_APK:-app-signed.apk}"
+
+# ============================================================
+# TERMINAL COLORS
+# ============================================================
+
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    C_RESET=$'\033[0m'
+    C_RED=$'\033[31m'
+    C_GREEN=$'\033[32m'
+    C_YELLOW=$'\033[33m'
+    C_BLUE=$'\033[34m'
+    C_CYAN=$'\033[36m'
+    C_WHITE=$'\033[1;37m'
+    C_GRAY=$'\033[90m'
+else
+    C_RESET=''
+    C_RED=''
+    C_GREEN=''
+    C_YELLOW=''
+    C_BLUE=''
+    C_CYAN=''
+    C_WHITE=''
+    C_GRAY=''
+fi
+
+# ============================================================
+# INTERFACE
+# ============================================================
+
+print_logo() {
+    printf '\n'
+    printf '%s' "$C_CYAN"
+    cat <<'EOF'
+     _    ____  _  __   ____  ___ ____  _   _ _____ ____
+    / \  |  _ \| |/ /  / ___|/ _ \___ \| \ | | ____|  _ \
+   / _ \ | |_) |   /  | |   | | | |__) |  \| |  _| | |_) |
+  / ___ \|  __/| . \  | |___| |_| / __/| |\  | |___|  _ <
+ /_/   \_\_|   |_|\_\  \____|\___/_____|_| \_|_____|_| \_\
+EOF
+    printf '%s\n' "$C_RESET"
+
+    printf '  %sAndroid APK Signing Utility%s\n' "$C_WHITE" "$C_RESET"
+    printf '  %sVersion %s | Apache-2.0 | macOS / Linux%s\n' \
+        "$C_GRAY" "$VERSION" "$C_RESET"
+
+    printf '\n'
+    printf '%s------------------------------------------------------------%s\n' \
+        "$C_GRAY" "$C_RESET"
+}
+
+info() {
+    printf '  %s[INFO]%s %s\n' "$C_BLUE" "$C_RESET" "$1"
+}
+
+ok() {
+    printf '  %s[ OK ]%s %s\n' "$C_GREEN" "$C_RESET" "$1"
+}
+
+warn() {
+    printf '  %s[WARN]%s %s\n' "$C_YELLOW" "$C_RESET" "$1"
+}
+
+fail() {
+    printf '  %s[FAIL]%s %s\n' "$C_RED" "$C_RESET" "$1" >&2
+}
+
+step() {
+    printf '\n  %s>>>%s %s\n' "$C_CYAN" "$C_RESET" "$1"
+}
+
+die() {
+    fail "$1"
+    exit 1
+}
+
+# ============================================================
+# ERROR HANDLING
+# ============================================================
+
+on_error() {
+    local code=$?
+    local line_number=$1
+
+    trap - ERR
+
+    fail "Command failed at line ${line_number}."
+    fail "Exit code: ${code}"
+
+    exit "$code"
+}
+
+trap 'on_error "$LINENO"' ERR
+
+# ============================================================
+# CLEANUP
+# ============================================================
+
+cleanup() {
+    local code=$?
+
+    if [[ -n "${ALIGNED:-}" ]]; then
+        rm -f "$ALIGNED"
+    fi
+
+    exit "$code"
+}
+
+trap cleanup EXIT
+
+# ============================================================
+# BUILD TOOLS DISCOVERY
+# ============================================================
+
+find_build_tools() {
+    step "Discovering Android Build Tools"
+
+    local directory
+    local version
+    local best_version=""
+    local best_major=0
+    local best_minor=0
+    local best_patch=0
+    local major minor patch
+
+    [[ -d "$SDK/build-tools" ]] || \
+        die "Build Tools directory not found: $SDK/build-tools"
+
+    for directory in "$SDK"/build-tools/*; do
+        [[ -d "$directory" ]] || continue
+
+        version=${directory##*/}
+
+        # Accept numeric dotted versions only.
+        if [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            major=${BASH_REMATCH[1]}
+            minor=${BASH_REMATCH[2]}
+            patch=${BASH_REMATCH[3]}
+        elif [[ "$version" =~ ^([0-9]+)\.([0-9]+)$ ]]; then
+            major=${BASH_REMATCH[1]}
+            minor=${BASH_REMATCH[2]}
+            patch=0
+        else
+            continue
+        fi
+
+        if (( major > best_major ||
+              (major == best_major && minor > best_minor) ||
+              (major == best_major && minor == best_minor && patch > best_patch) )); then
+
+            best_major=$major
+            best_minor=$minor
+            best_patch=$patch
+            best_version=$version
+        fi
+    done
+
+    [[ -n "$best_version" ]] || \
+        die "No valid Android Build Tools version found."
+
+    BT="$SDK/build-tools/$best_version"
+
+    ZIPALIGN="$BT/zipalign"
+    APKSIGNER="$BT/apksigner"
+
+    [[ -x "$ZIPALIGN" ]] || die "zipalign not executable."
+    [[ -x "$APKSIGNER" ]] || die "apksigner not executable."
+
+    ok "Build Tools: $best_version"
+}
+
+# ============================================================
+# VALIDATION
+# ============================================================
+
+validate() {
+    step "Validating environment"
+
+    [[ -d "$SDK" ]] || die "Android SDK not found: $SDK"
+    [[ -f "$INPUT" ]] || die "Release APK not found: $INPUT"
+    [[ -f "$KEYSTORE" ]] || die "Keystore not found: $KEYSTORE"
+
+    command -v rm >/dev/null 2>&1 || die "rm unavailable."
+    command -v wc >/dev/null 2>&1 || die "wc unavailable."
+
+    ok "Input APK found."
+    ok "Keystore found."
+
+    info "SDK: $SDK"
+    info "Input: $INPUT"
+}
+
+# ============================================================
+# ALIGNMENT
+# ============================================================
+
+align_apk() {
+    step "Aligning APK"
+
+    rm -f "$ALIGNED"
+
+    "$ZIPALIGN" -f -v 4 "$INPUT" "$ALIGNED"
+
+    [[ -s "$ALIGNED" ]] || die "APK alignment produced no output."
+
+    ok "APK aligned successfully."
+}
+
+# ============================================================
+# SIGNING
+# ============================================================
+
+sign_apk() {
+    step "Signing APK"
+
+    rm -f "$OUTPUT" "${OUTPUT}.idsig"
+
+    info "Alias: $ALIAS"
+    info "Schemes: v1 / v2 / v3"
+
+    warn "Enter your keystore password when prompted."
+
+    "$APKSIGNER" sign \
+        --ks "$KEYSTORE" \
+        --ks-key-alias "$ALIAS" \
+        --v1-signing-enabled true \
+        --v2-signing-enabled true \
+        --v3-signing-enabled true \
+        --out "$OUTPUT" \
+        "$ALIGNED"
+
+    [[ -s "$OUTPUT" ]] || die "Signed APK was not generated."
+
+    ok "APK signed successfully."
+}
+
+# ============================================================
+# VERIFICATION
+# ============================================================
+
+verify_apk() {
+    step "Verifying signature"
+
+    "$APKSIGNER" verify \
+        --verbose \
+        --print-certs \
+        "$OUTPUT"
+
+    ok "Signature verification successful."
+}
+
+# ============================================================
+# SUMMARY
+# ============================================================
+
+summary() {
+    local size
+
+    size=$(wc -c < "$OUTPUT" | tr -d '[:space:]')
+
+    printf '\n'
+    printf '%s------------------------------------------------------------%s\n' \
+        "$C_GRAY" "$C_RESET"
+
+    printf '\n  %sBUILD COMPLETED SUCCESSFULLY%s\n' "$C_GREEN" "$C_RESET"
+
+    printf '\n'
+    info "Output: $OUTPUT"
+    info "Size: ${size} bytes"
+
+    printf '\n'
+    printf '%s------------------------------------------------------------%s\n' \
+        "$C_GRAY" "$C_RESET"
+    printf '\n'
+}
+
+# ============================================================
+# MAIN
+# ============================================================
+
+main() {
+    print_logo
+    validate
+    find_build_tools
+    align_apk
+    sign_apk
+    verify_apk
+    summary
+}
+
+main "$@"
+

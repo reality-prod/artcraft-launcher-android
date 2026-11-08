@@ -50,7 +50,10 @@ fn pick<'a>(apks: &[&'a Asset], abis: &[&str]) -> Option<&'a Asset> {
                 .copied()
                 .find(|a| has(a, "armeabi") || has(a, "armv7")),
             "x86_64" => apks.iter().copied().find(|a| has(a, "x86_64")),
-            "x86" => apks.iter().copied().find(|a| has(a, "x86") && !has(a, "x86_64")),
+            "x86" => apks
+                .iter()
+                .copied()
+                .find(|a| has(a, "x86") && !has(a, "x86_64")),
             _ => None,
         };
         if hit.is_some() {
@@ -73,14 +76,21 @@ fn sha_of(a: &Asset) -> Option<String> {
 pub fn pick_json(release_json: &str, abis_csv: &str) -> String {
     let release: Release = match serde_json::from_str(release_json) {
         Ok(r) => r,
-        Err(e) => return serde_json::json!({ "ok": false, "error": format!("bad release json: {e}") }).to_string(),
+        Err(e) => {
+            return serde_json::json!({ "ok": false, "error": format!("bad release json: {e}") })
+                .to_string()
+        }
     };
     let apks: Vec<&Asset> = release
         .assets
         .iter()
         .filter(|a| a.name.to_ascii_lowercase().ends_with(".apk"))
         .collect();
-    let abis: Vec<&str> = abis_csv.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let abis: Vec<&str> = abis_csv
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
     let picked = pick(&apks, &abis).map(|a| Picked {
         name: &a.name,
         url: &a.browser_download_url,
@@ -116,8 +126,15 @@ mod tests {
 
     #[test]
     fn arm64_phone_gets_the_plain_apk() {
-        let r = release(&["app-0.0.5-armeabi-v7a.apk", "app-0.0.5.apk", "SHA256SUMS.txt"]);
-        assert_eq!(name_of(&pick_json(&r, "arm64-v8a,armeabi-v7a,armeabi")).as_deref(), Some("app-0.0.5.apk"));
+        let r = release(&[
+            "app-0.0.5-armeabi-v7a.apk",
+            "app-0.0.5.apk",
+            "SHA256SUMS.txt",
+        ]);
+        assert_eq!(
+            name_of(&pick_json(&r, "arm64-v8a,armeabi-v7a,armeabi")).as_deref(),
+            Some("app-0.0.5.apk")
+        );
     }
 
     #[test]
